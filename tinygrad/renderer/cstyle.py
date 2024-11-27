@@ -1,6 +1,7 @@
 from __future__ import annotations
 from typing import Dict, List, Optional, Tuple, Union, DefaultDict, Literal, Callable, cast
 import os, math
+import pdb
 from collections import defaultdict, Counter
 from tinygrad.ops import GroupOp, UnaryOps, BinaryOps, TernaryOps, Ops, UOp, PatternMatcher, UPat, cast_float_to_bf16
 from tinygrad.helpers import strip_parens, getenv, prod, dedup, AMX
@@ -16,8 +17,11 @@ base_rewrite = PatternMatcher([
   # r method accesses
   (UPat(Ops.RANGE, name="x"),
    lambda ctx,x: f"for ({ctx.render_dtype(x.dtype)} {ctx[x]} = {ctx[x.src[0]]}; {ctx[x]} < {ctx[x.src[1]]}; {ctx[x]}++) {{"),
+  #(UPat(Ops.VECTORIZE, name="x"),
+  # lambda ctx,x: f"{ctx.float4.replace('float4', ctx.render_dtype(x.dtype))}" + \
+  #  (f"{{{','.join([ctx[y] for y in x.src])}}}" if ctx.device == "CLANG" else f"({','.join([ctx[y] for y in x.src])})")),
   (UPat(Ops.VECTORIZE, name="x"),
-   lambda ctx,x: f"{ctx.float4.replace('float4', ctx.render_dtype(x.dtype))}" + \
+   lambda ctx,x: \
     (f"{{{','.join([ctx[y] for y in x.src])}}}" if ctx.device == "CLANG" else f"({','.join([ctx[y] for y in x.src])})")),
   (UPat(Ops.CAST, name="x"), lambda ctx,x: f"({ctx.render_dtype(x.dtype)})({ctx[x.src[0]]})"),
   (UPat(Ops.BITCAST, name="x"), lambda ctx,x: f"(*(({ctx.buffer_prefix}{ctx.render_dtype(x.dtype)}*)&{ctx[x.src[0]]}))"),
@@ -41,11 +45,17 @@ base_rewrite = PatternMatcher([
   # default const render
   (UPat(Ops.CONST, name="x"), lambda ctx,x: str(x.arg)),
   # new load/store
+  #EF# here is the pointer setting
+  ##(UPat(Ops.INDEX, src=(UPat.var("buf"), UPat.var('idx'))),
+  ## lambda ctx,buf,idx: f"({ctx[buf]}+{strip_parens(ctx[idx]) if idx.arg == BinaryOps.ADD else ctx[idx]})"),
+  ##(UPat(Ops.LOAD, src=(UPat.var('bidx'), UPat.var("var"), UPat.var("gate"))), lambda ctx,bidx,var,gate: f"({ctx[gate]}?*{ctx[bidx]}:{ctx[var]})"),
+  ##(UPat(Ops.LOAD, src=(UPat.var('bidx'),), allow_any_len=True), lambda ctx,bidx: f"*{ctx[bidx]}"),
+  ##(UPat(Ops.STORE, src=(UPat.var('bidx'), UPat.var("var")), allow_any_len=True), lambda ctx,bidx,var: f"*{ctx[bidx]} = {ctx[var]};"),
   (UPat(Ops.INDEX, src=(UPat.var("buf"), UPat.var('idx'))),
-   lambda ctx,buf,idx: f"({ctx[buf]}+{strip_parens(ctx[idx]) if idx.arg == BinaryOps.ADD else ctx[idx]})"),
-  (UPat(Ops.LOAD, src=(UPat.var('bidx'), UPat.var("var"), UPat.var("gate"))), lambda ctx,bidx,var,gate: f"({ctx[gate]}?*{ctx[bidx]}:{ctx[var]})"),
-  (UPat(Ops.LOAD, src=(UPat.var('bidx'),), allow_any_len=True), lambda ctx,bidx: f"*{ctx[bidx]}"),
-  (UPat(Ops.STORE, src=(UPat.var('bidx'), UPat.var("var")), allow_any_len=True), lambda ctx,bidx,var: f"*{ctx[bidx]} = {ctx[var]};"),
+   lambda ctx,buf,idx: f"{ctx[buf]}[{strip_parens(ctx[idx]) if idx.arg == BinaryOps.ADD else ctx[idx]}]"),
+  (UPat(Ops.LOAD, src=(UPat.var('bidx'), UPat.var("var"), UPat.var("gate"))), lambda ctx,bidx,var,gate: f"({ctx[gate]}?{ctx[bidx]}:{ctx[var]})"),
+  (UPat(Ops.LOAD, src=(UPat.var('bidx'),), allow_any_len=True), lambda ctx,bidx: f"{ctx[bidx]}"),
+  (UPat(Ops.STORE, src=(UPat.var('bidx'), UPat.var("var")), allow_any_len=True), lambda ctx,bidx,var: f"{ctx[bidx]} = {ctx[var]};"),
   # alu/gep
   (UPat(GroupOp.ALU, name="x"), lambda ctx,x: ctx.code_for_op[x.op](
     *([strip_parens(ctx[v]) if v.op == x.op and x.op in {BinaryOps.ADD, BinaryOps.MUL, BinaryOps.XOR} else ctx[v] for v in x.src]), x.dtype)),
@@ -77,7 +87,9 @@ class CStyleLanguage(Renderer):
   barrier: str = ""
   code_for_workitem: Dict[Union[Literal["g"], Literal["l"], Literal["i"]], Callable] = {}
   extra_args: List[str] = []
-  float4: Optional[str] = None
+  supports_float4 = False
+  has_local = False
+  #float4: Optional[str] = None
   type_map: Dict[DType, str] = {}
   infinity: str = "INFINITY"
   nan: str = "NAN"
@@ -145,6 +157,8 @@ class CStyleLanguage(Renderer):
                   Ops.INDEX: "bidx", Ops.DEFINE_ACC: "acc", Ops.LOAD: "val"}.get(u.op, "alu")
         r[u] = f"{prefix}{c[prefix]}"
 
+      #EF# this is where the rewrite happens
+      #pdb.set_trace()
       l = cast(str, self.string_rewrite.rewrite(u, ctx=self))
       assert l is not None, f"failed to render {u.op} {u.dtype} {[(x.op,x.dtype) for x in u.src]} {u.arg}"
 
