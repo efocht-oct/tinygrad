@@ -6,14 +6,20 @@ from tinygrad.renderer.cstyle import ClangRenderer
 
 class ClangCompiler(Compiler):
   def __init__(self, cachekey="compile_clang", args:Optional[List[str]]=None, objdump_tool='objdump'):
-    self.args = ['-march=native'] if args is None else args
+    self.args = ['-march=rv64gv'] if args is None else args
     self.objdump_tool = objdump_tool
     super().__init__(cachekey)
 
   def compile(self, src:str) -> bytes:
     # TODO: remove file write. sadly clang doesn't like the use of /dev/stdout here
     with tempfile.NamedTemporaryFile(delete=True) as output_file:
-      subprocess.check_output(['clang', '-shared', *self.args, '-O2', '-Wall', '-Werror', '-x', 'c', '-fPIC', '-ffreestanding', '-nostdlib',
+      #subprocess.check_output(['clang', '-shared', *self.args, '-O2', '-Wall', '-Werror', '-x', 'c', '-fPIC', '-ffreestanding', '-nostdlib',
+      subprocess.check_output(['clang', '-shared', *self.args, '-O3', #'-Wall', #'-Werror', 
+                               '-x', 'c', '-fPIC', '-ffreestanding', #'-nostdlib', #'-fno-vectorize',
+                               '-ffast-math', '-fopenmp', 
+                               '-mllvm', '-scalable-vectorization=on', #'-mrvv-vector-bits=256',
+                               '-Rpass=loop-vectorize', #'-Rpass-missed=loop-vectorize', '-Rpass-analysis=loop-vectorize',
+                               '-lomp', '-ldl', '-lrt', '-lm',
                                '-', '-o', str(output_file.name)], input=src.encode('utf-8'))
       return pathlib.Path(output_file.name).read_bytes()
 
@@ -25,7 +31,7 @@ class ClangProgram:
     # write to disk so we can load it
     with tempfile.NamedTemporaryFile(delete=True) as cached_file_path:
       pathlib.Path(cached_file_path.name).write_bytes(lib)
-      self.fxn = ctypes.CDLL(str(cached_file_path.name))[name]
+      self.fxn = ctypes.CDLL(str(cached_file_path.name), mode=ctypes.RTLD_GLOBAL)[name]
 
   def __call__(self, *bufs, vals=(), wait=False): return cpu_time_execution(lambda: self.fxn(*bufs, *vals), enable=wait)
 
